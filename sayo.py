@@ -1,5 +1,5 @@
 __author__ = 'Samuel Charron'
-__version__ = '0.2.dev0'
+__version__ = '0.3.dev0'
 __license__ = 'MIT'
 
 import asyncio
@@ -7,7 +7,11 @@ import json
 import logging
 import ssl
 
-import websockets
+try:
+    import websockets
+except ImportError:
+    # when building the package
+    pass
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger('websockets')
