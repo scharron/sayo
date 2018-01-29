@@ -11,11 +11,11 @@ import websockets
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger('websockets')
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.WARNING)
 logger.addHandler(logging.StreamHandler())
 
 logger = logging.getLogger('SocketIO')
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.WARNING)
 
 
 class Sayo:
@@ -26,25 +26,18 @@ class Sayo:
         self.timeout = 5000
         self.ping_interval = 1000
         self.callbacks = {}
-        self.sequence = 0
+        self.sequence = -1
         self.logger = logging.getLogger("SocketIO")
         self.ping = None
         self.send_queue = []
         self.receiver: asyncio.Future = None
         self.events = {}
-        self._closing = False
-        self._close_future = None
+        self.closing = None
+        self.closing_future = None
 
-    async def connect(self, uri, verify=True):
-        if uri.startswith("wss"):
-            if verify:
-                raise NotImplementedError
-            else:
-                ctx = ssl.SSLContext()
-                ctx.verify_mode = ssl.CERT_NONE
-        else:
-            ctx = None
-
+    async def connect(self, uri):
+        ctx = ssl.SSLContext()
+        ctx.verify_mode = ssl.CERT_NONE
         self.conn = await websockets.connect(uri + "/socket.io/?EIO=3&transport=websocket", ssl=ctx)
         session = await self.conn.recv()
         if session[0] != '0':
@@ -56,6 +49,12 @@ class Sayo:
         self.ping_interval = session["pingInterval"] // 1000
 
         self.ping = asyncio.ensure_future(self._schedule_ping())
+
+        self.closing = asyncio.Event()
+        self.closing_future = asyncio.ensure_future(self._wait_closing())
+
+    async def _wait_closing(self):
+        await self.closing.wait()
 
     async def _schedule_ping(self):
         while True:
@@ -77,18 +76,16 @@ class Sayo:
 
     async def read(self):
         while True:
+            # Do not interrupt
             if self.receiver is None:
                 self.receiver = asyncio.ensure_future(self.conn.recv())
 
-            done, pending = await self._wait()
-            if self._closing and len(pending) == 0:
-                self.logger.info("Closing connection, leaving read loop")
-                return
+            futures = [self.receiver, self.ping, self.closing_future] + self.send_queue
+            done, pending = await asyncio.wait(futures, timeout=self.timeout, return_when=asyncio.FIRST_COMPLETED)
 
             # Timeout
             if len(done) == 0:
-                logging.warning("Timeout. Disconnecting.")
-                await self._disconnect()
+                self._disconnect()
                 return
 
             for d in done:
@@ -104,6 +101,10 @@ class Sayo:
 
             if self.receiver in done:
                 self.process_message()
+
+            if self.closing.is_set():
+                print("closing")
+                break
 
     def process_message(self):
         msg = self.receiver.result()
@@ -171,15 +172,9 @@ class Sayo:
     def register(self, event, callback):
         self.events[event] = callback
 
-    async def _disconnect(self):
-        self._closing = True
-        self.ping.cancel()
-        for s in self.send_queue:
-            s.cancel()
-        if self.receiver is not None:
-            self.receiver.cancel()
-
-        await self.conn.close()
-
     def close(self):
-        self._close_future = asyncio.ensure_future(self._disconnect())
+        self._disconnect()
+
+    def _disconnect(self):
+        self.closing.set()
+        self.conn.close()
